@@ -8,6 +8,7 @@ A Python-based trading suggestion system that analyzes stocks using technical in
 - Technical indicators (RSI, volatility)
 - News sentiment analysis using VADER
 - Options chain data integration
+- Options Greeks analysis (Delta, Gamma, Theta, Vega)
 - Configurable trading signals
 - Detailed reasoning for each suggestion
 

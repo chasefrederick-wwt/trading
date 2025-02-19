@@ -6,3 +6,4 @@ vaderSentiment
 python-dotenv
 certifi
 urllib3
+scipy

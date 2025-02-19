@@ -5,14 +5,11 @@ from datetime import datetime, timedelta
 import logging
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import requests
-from typing import List, Dict, Tuple
-import json
+from typing import Dict
 import os
 from dotenv import load_dotenv
-import ssl
 import urllib3
-import warnings
-import subprocess
+from scipy.stats import norm
 
 # Load environment variables from .env file
 load_dotenv()
@@ -51,17 +48,6 @@ news_adapter = requests.adapters.HTTPAdapter(
 news_session.mount('https://', news_adapter)
 news_session.verify = False  # Disable SSL verification entirely
 
-# Custom JSON encoder to handle numpy types
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return super(NumpyEncoder, self).default(obj)
-
 class MarketDataCollector:
     def __init__(self):
         self.news_api_key = os.getenv('NEWS_API_KEY')
@@ -90,7 +76,10 @@ class MarketDataCollector:
         try:
             debug_logger.info(f"Fetching options chain for {ticker}")
             stock = yf.Ticker(ticker, session=self.yf_session)
-            next_week = datetime.now() + timedelta(days=7)
+            
+            # Look for options 7-30 days out instead of next week
+            min_date = datetime.now() + timedelta(days=7)
+            max_date = datetime.now() + timedelta(days=30)
             options = stock.options
             
             if not options:
@@ -98,15 +87,24 @@ class MarketDataCollector:
                 return {}
                 
             debug_logger.info(f"Available options dates for {ticker}: {options}")
-            near_term = [date for date in options if datetime.strptime(date, '%Y-%m-%d') <= next_week]
             
-            if not near_term:
-                debug_logger.warning(f"No near-term options found for {ticker}")
+            # Find an option date between 7 and 30 days out
+            valid_dates = [date for date in options 
+                          if min_date <= datetime.strptime(date, '%Y-%m-%d') <= max_date]
+            
+            if not valid_dates:
+                debug_logger.warning(f"No options found in desired date range for {ticker}")
                 return {}
-                
-            chain = stock.option_chain(near_term[0])
-            debug_logger.info(f"Retrieved options chain for {ticker} expiring {near_term[0]}")
-            return {'calls': chain.calls, 'puts': chain.puts}
+            
+            # Use the first valid date
+            exp_date = valid_dates[0]
+            chain = stock.option_chain(exp_date)
+            debug_logger.info(f"Retrieved options chain for {ticker} expiring {exp_date}")
+            return {
+                'calls': chain.calls, 
+                'puts': chain.puts,
+                'expiration_date': exp_date
+            }
         except Exception as e:
             debug_logger.error(f"Error fetching options data for {ticker}: {str(e)}")
             return {}
@@ -166,6 +164,58 @@ class TradingAnalyzer:
     @staticmethod
     def calculate_volatility(data: pd.DataFrame) -> float:
         return data['Close'].pct_change().std() * np.sqrt(252)
+
+    def calculate_option_greeks(self, 
+                              stock_price: float, 
+                              strike_price: float, 
+                              days_to_expiry: float, 
+                              risk_free_rate: float = 0.05, 
+                              volatility: float = None) -> Dict[str, float]:
+        """
+        Calculate option Greeks using Black-Scholes model
+        """
+        try:
+            if days_to_expiry <= 0:
+                return {
+                    'delta': 0.0,
+                    'gamma': 0.0,
+                    'theta': 0.0,
+                    'vega': 0.0
+                }
+            
+            if volatility is None or volatility <= 0:
+                volatility = 0.2  # Use default volatility if none provided or invalid
+            
+            T = max(days_to_expiry / 365.0, 0.01)  # Ensure minimum time value
+            S = max(stock_price, 0.01)  # Ensure positive stock price
+            K = max(strike_price, 0.01)  # Ensure positive strike price
+            r = risk_free_rate
+            sigma = volatility
+            
+            # Calculate d1 and d2
+            d1 = (np.log(S/K) + (r + sigma**2/2)*T) / (sigma*np.sqrt(T))
+            d2 = d1 - sigma*np.sqrt(T)
+            
+            # Calculate Greeks
+            delta = norm.cdf(d1)
+            gamma = norm.pdf(d1)/(S*sigma*np.sqrt(T))
+            theta = (-S*sigma*norm.pdf(d1))/(2*np.sqrt(T)) - r*K*np.exp(-r*T)*norm.cdf(d2)
+            vega = S*np.sqrt(T)*norm.pdf(d1)
+            
+            return {
+                'delta': delta,
+                'gamma': gamma,
+                'theta': theta/365,  # Daily theta
+                'vega': vega/100    # 1% volatility change
+            }
+        except Exception as e:
+            debug_logger.error(f"Error calculating Greeks: {str(e)}")
+            return {
+                'delta': 0.0,
+                'gamma': 0.0,
+                'theta': 0.0,
+                'vega': 0.0
+            }
 
     def analyze_ticker(self, ticker: str, data: pd.DataFrame, options: Dict, sentiment: float) -> Dict:
         try:
@@ -229,13 +279,43 @@ class TradingAnalyzer:
             current_price = data['Close'].iloc[-1]
             atm_option = chain.iloc[(chain['strike'] - current_price).abs().argsort()[:1]]
             
+            # Get expiration date from options data
+            exp_date = options.get('expiration_date')
+            if not exp_date:
+                debug_logger.error(f"Could not determine expiration date for {ticker}")
+                return {}
+                
+            # Calculate days to expiry
+            exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
+            days_to_expiry = (exp_datetime - datetime.now()).days
+            
+            # Calculate Greeks
+            greeks = self.calculate_option_greeks(
+                stock_price=current_price,
+                strike_price=float(atm_option['strike'].iloc[0]),
+                days_to_expiry=days_to_expiry,
+                volatility=volatility
+            )
+            
+            # Add Greeks analysis to reasoning
+            greek_analysis = []
+            if greeks['delta'] > 0.5:
+                greek_analysis.append(f"High Delta ({greeks['delta']:.2f}) indicates strong directional movement")
+            if abs(greeks['theta']) > 0.1:
+                greek_analysis.append(f"High Theta decay (${greeks['theta']:.2f}/day) suggests time sensitivity")
+            if greeks['gamma'] > 0.05:
+                greek_analysis.append(f"High Gamma ({greeks['gamma']:.2f}) indicates potential for rapid Delta changes")
+            if greeks['vega'] > 1.0:
+                greek_analysis.append(f"High Vega ({greeks['vega']:.2f}) shows significant volatility sensitivity")
+            
             return {
                 'ticker': ticker,
                 'type': direction,
                 'strike': float(atm_option['strike'].iloc[0]),
-                'expiration': atm_option.index[0],
+                'expiration': exp_date,  # Use the string date here
                 'confidence': confidence,
-                'reasoning': ' | '.join(signals['reasons'])
+                'reasoning': ' | '.join(signals['reasons'] + greek_analysis),
+                'greeks': greeks
             }
             
         except Exception as e:
@@ -265,7 +345,7 @@ class TradingSuggestionEngine:
 
 def main():
     engine = TradingSuggestionEngine()
-    tickers = ['SPY', 'QQQ', 'IWM']
+    tickers = ['SPY', 'QQQ']
     
     header = f"""
 === OPTIONS TRADING SUGGESTIONS ===
@@ -275,6 +355,15 @@ RSI (Relative Strength Index):
 - Below 40: Stock may be oversold (potentially good time to buy)
 - Above 60: Stock may be overbought (potentially good time to sell)
 - Between 40-60: Neutral territory
+
+Greeks Explained:
+- Delta (0 to 1): Probability of option finishing in-the-money
+  • 0.50: At-the-money
+  • >0.70: Deep in-the-money
+  • <0.30: Deep out-of-the-money
+- Gamma: Rate of change in Delta (higher means faster Delta changes)
+- Theta: Daily cost of time decay (negative means option loses value each day)
+- Vega: Option's sensitivity to 1% change in volatility
 
 Expiration: Days until the option expires
 Confidence: How strong the trading signals are (25-100%)
@@ -287,13 +376,18 @@ Confidence: How strong the trading signals are (25-100%)
         suggestion = engine.generate_suggestion(ticker)
         if suggestion:
             # Calculate expiration days
-            exp_date = datetime.strptime(str(suggestion['expiration']), '%Y-%m-%d')
+            exp_date = datetime.strptime(suggestion['expiration'], '%Y-%m-%d')
             days_to_exp = (exp_date - datetime.now()).days
             
             output = f"\n{ticker}:\n"
             output += f"→ {suggestion['type'].upper()} @ ${suggestion['strike']:.2f}\n"
             output += f"→ Expires: {days_to_exp} days ({exp_date.strftime('%Y-%m-%d')})\n"
             output += f"→ Confidence: {suggestion['confidence']}%\n"
+            output += f"→ Greeks:\n"
+            output += f"  • Delta: {suggestion['greeks']['delta']:.3f} (Probability of profit, >0.50 is bullish)\n"
+            output += f"  • Gamma: {suggestion['greeks']['gamma']:.3f} (Higher values mean faster Delta changes)\n"
+            output += f"  • Theta: ${suggestion['greeks']['theta']:.2f}/day (Daily cost of time decay)\n"
+            output += f"  • Vega: ${suggestion['greeks']['vega']:.2f} (Price change per 1% volatility change)\n"
             output += f"→ Reasoning:\n"
             
             # Add explanations for each signal
