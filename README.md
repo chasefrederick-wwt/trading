@@ -5,16 +5,32 @@ A Python-based trading suggestion system that analyzes ETFs (SPY, QQQ) using tec
 ## Features
 
 - Real-time stock data analysis using yfinance
-- Technical indicators (RSI, volatility)
-- News sentiment analysis using VADER
-- Options chain data integration
-- Black-Scholes options Greeks analysis:
-  - Delta: Probability of option finishing in-the-money
+- Comprehensive Technical Analysis:
+  - RSI (Relative Strength Index)
+  - Moving Averages (20/50 SMA, 12/26 EMA)
+  - MACD (Moving Average Convergence Divergence)
+  - Bollinger Bands
+  - Average True Range (ATR)
+  - Stochastic Oscillator
+  - Volume Analysis
+  - Beta Calculation
+  - Price Momentum
+- Signal Strength Metrics:
+  - Confirmation Score
+  - Indicator Group Agreement
+  - Signal Group Analysis:
+    - Trend Indicators
+    - Momentum Indicators
+    - Volatility Indicators
+    - Volume Indicators
+- News Sentiment Analysis using VADER
+- Options Analysis:
+  - Black-Scholes Greeks Calculation
+  - Delta: Probability of profit
   - Gamma: Rate of change in Delta
   - Theta: Time decay cost
   - Vega: Volatility sensitivity
-- Configurable trading signals
-- Detailed reasoning for each suggestion
+- Detailed Trade Reasoning
 
 ## Prerequisites
 
@@ -60,20 +76,17 @@ python3 trade.py
 ```
 
 The program analyzes SPY and QQQ ETFs using multiple factors:
-- RSI (Relative Strength Index)
-  - Below 40: Potentially oversold
-  - Above 60: Potentially overbought
-  - 40-60: Neutral
-- Options Greeks
-  - Delta (0-1): Probability of profit
-    - 0.50: At-the-money
-    - >0.70: Deep in-the-money
-    - <0.30: Deep out-of-the-money
-  - Gamma: Rate of Delta change
-  - Theta: Daily time decay cost
-  - Vega: Volatility sensitivity
-- News sentiment
-- Price trends
+- Technical Indicators:
+  - RSI thresholds (40/60)
+  - Moving Average crossovers
+  - MACD signals
+  - Bollinger Band positions
+  - Volume analysis
+  - Momentum signals
+  - Stochastic crossovers
+- Options Greeks Analysis
+- News Sentiment
+- Signal Strength Analysis
 
 ### Sample Output
 ```
@@ -89,28 +102,43 @@ QQQ:
   • Gamma: 0.031 (Higher values mean faster Delta changes)
   • Theta: $-0.40/day (Daily cost of time decay)
   • Vega: $0.30 (Price change per 1% volatility change)
-→ Reasoning:
-  • RSI showing potential overbought (69.39)
-  • Positive sentiment (0.27)
-  • Positive price trend (0.48%)
+→ Signal Strength:
+  • Confirmation Score: 75% of indicator groups agree
+  • Total Signals: 8
+  • Indicator Group Agreement:
+    - Trend Indicators: ✓ (67% strength)
+    - Momentum Indicators: ✓ (100% strength)
+    - Volatility Indicators: ✗ (50% strength)
+    - Volume Indicators: ✓ (100% strength)
 ```
 
 ## Configuration
 
 The system uses several configurable parameters in `trade.py`:
-- RSI thresholds (default: oversold < 40, overbought > 60)
-- Volatility threshold (default: 0.15)
-- Sentiment thresholds (default: ±0.1 for weak, ±0.15 for strong)
-- Price trend significance (default: 0.001 or 0.1%)
-- Options expiration window: 7-30 days
+- Technical Analysis:
+  - RSI thresholds (default: oversold < 40, overbought > 60)
+  - Moving Average periods (20/50 day)
+  - MACD parameters (12/26/9)
+  - Bollinger Bands (20-day, 2 standard deviations)
+  - Volume ratio threshold (1.5x average)
+  - Momentum threshold (2%)
+- Options Parameters:
+  - Expiration window: 7-30 days
+  - Risk-free rate: 5%
+  - Default volatility: 20%
+- Signal Strength:
+  - Confidence calculation
+  - Group agreement thresholds
+  - Signal confirmation weights
 
 ## Limitations
 
 - News API free tier is limited to 100 requests per day
 - Options data availability depends on market hours
 - Past performance does not guarantee future results
-- This tool should not be used as the sole basis for trading decisions
+- Technical analysis assumes historical patterns repeat
 - Greeks calculations assume Black-Scholes model assumptions
+- Signal strength metrics are relative indicators
 
 ## Contributing
 
