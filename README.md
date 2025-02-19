@@ -1,6 +1,6 @@
 # Options Trading Suggestion Engine
 
-A Python-based trading suggestion system that analyzes stocks using technical indicators, market sentiment, and options data to generate potential trading opportunities.
+A Python-based trading suggestion system that analyzes ETFs (SPY, QQQ) using technical indicators, market sentiment, options Greeks, and price data to generate potential trading opportunities.
 
 ## Features
 
@@ -8,7 +8,11 @@ A Python-based trading suggestion system that analyzes stocks using technical in
 - Technical indicators (RSI, volatility)
 - News sentiment analysis using VADER
 - Options chain data integration
-- Options Greeks analysis (Delta, Gamma, Theta, Vega)
+- Black-Scholes options Greeks analysis:
+  - Delta: Probability of option finishing in-the-money
+  - Gamma: Rate of change in Delta
+  - Theta: Time decay cost
+  - Vega: Volatility sensitivity
 - Configurable trading signals
 - Detailed reasoning for each suggestion
 
@@ -55,36 +59,50 @@ Run the main script:
 python3 trade.py
 ```
 
-The program will analyze several popular ETFs (SPY, QQQ, IWM) and generate trading suggestions based on:
+The program analyzes SPY and QQQ ETFs using multiple factors:
 - RSI (Relative Strength Index)
-- Price volatility
+  - Below 40: Potentially oversold
+  - Above 60: Potentially overbought
+  - 40-60: Neutral
+- Options Greeks
+  - Delta (0-1): Probability of profit
+    - 0.50: At-the-money
+    - >0.70: Deep in-the-money
+    - <0.30: Deep out-of-the-money
+  - Gamma: Rate of Delta change
+  - Theta: Daily time decay cost
+  - Vega: Volatility sensitivity
 - News sentiment
-- Recent price trends
+- Price trends
 
 ### Sample Output
 ```
 === OPTIONS TRADING SUGGESTIONS ===
-Generated: 2025-02-19 07:25:07
-=====================================
+Generated: 2025-02-19 07:42:30
 
 QQQ:
 → CALL @ $539.00
-→ Expires: 42 days (2025-04-02)
+→ Expires: 7 days (2025-02-27)
 → Confidence: 75%
+→ Greeks:
+  • Delta: 0.533 (Probability of profit, >0.50 is bullish)
+  • Gamma: 0.031 (Higher values mean faster Delta changes)
+  • Theta: $-0.40/day (Daily cost of time decay)
+  • Vega: $0.30 (Price change per 1% volatility change)
 → Reasoning:
-  • RSI showing potential overbought (69.39) (Stock may be overvalued, suggesting potential decline)
-  • Volatility with positive sentiment (Price movement is significant enough to suggest a trading opportunity)
-  • Positive sentiment (0.27) (News and market sentiment suggest this direction)
-  • Positive price trend (0.48%) (Recent price movement supports this direction)
+  • RSI showing potential overbought (69.39)
+  • Positive sentiment (0.27)
+  • Positive price trend (0.48%)
 ```
 
 ## Configuration
 
-The system uses several configurable parameters that can be adjusted in `trade.py`:
+The system uses several configurable parameters in `trade.py`:
 - RSI thresholds (default: oversold < 40, overbought > 60)
 - Volatility threshold (default: 0.15)
 - Sentiment thresholds (default: ±0.1 for weak, ±0.15 for strong)
 - Price trend significance (default: 0.001 or 0.1%)
+- Options expiration window: 7-30 days
 
 ## Limitations
 
@@ -92,6 +110,7 @@ The system uses several configurable parameters that can be adjusted in `trade.p
 - Options data availability depends on market hours
 - Past performance does not guarantee future results
 - This tool should not be used as the sole basis for trading decisions
+- Greeks calculations assume Black-Scholes model assumptions
 
 ## Contributing
 
@@ -103,10 +122,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Disclaimer
 
-This software is for educational purposes only. It is not intended to be used as financial advice. Always do your own research and consult with a licensed financial advisor before making any investment decisions.
+This software is for educational purposes only. It is not intended to be used as financial advice. Always do your own research and consult with a licensed financial advisor before making any investment decisions. Options trading involves significant risk and is not suitable for all investors.
 
 ## Acknowledgments
 
 - [yfinance](https://github.com/ranaroussi/yfinance) for stock data
 - [VADER Sentiment](https://github.com/cjhutto/vaderSentiment) for sentiment analysis
 - [News API](https://newsapi.org/) for market news
+- Black-Scholes model for options Greeks calculations
