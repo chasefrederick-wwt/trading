@@ -1,0 +1,8 @@
+yfinance
+pandas
+numpy
+requests
+vaderSentiment
+python-dotenv
+certifi
+urllib3
