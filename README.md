@@ -59,14 +59,12 @@ pip install -r requirements.txt
 
 4. Set up your News API credentials:
    - Sign up at [News API](https://newsapi.org/)
-   - Copy the example environment file:
-     ```bash
-     cp .env.example .env
-     ```
-   - Add your API key to `.env`:
-     ```
-     NEWS_API_KEY=your-api-key-here
-     ```
+   - Create environment file:
+     - Create a file named `.env` in the project directory
+     - Add your News API key:
+       ```
+       NEWS_API_KEY=your-api-key-here
+       ```
 
 ## Usage
 
