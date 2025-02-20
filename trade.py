@@ -57,7 +57,7 @@ class MarketDataCollector:
         self.yf_session = yf_session
         self.news_session = news_session
         
-    def get_stock_data(self, ticker: str, period: str = "1mo") -> pd.DataFrame:
+    def get_stock_data(self, ticker: str, period: str = "3mo") -> pd.DataFrame:
         try:
             debug_logger.info(f"Fetching stock data for {ticker}")
             stock = yf.Ticker(ticker, session=self.yf_session)
@@ -220,89 +220,141 @@ class TradingAnalyzer:
     def calculate_technical_indicators(self, data: pd.DataFrame) -> Dict[str, float]:
         """Calculate various technical indicators for analysis"""
         try:
-            # Prepare data
-            close_prices = data['Close']
-            high_prices = data['High']
-            low_prices = data['Low']
-            volume = data['Volume']
+            # Check if we have enough data
+            if len(data) < 50:  # We need at least 50 days for the longest SMA
+                debug_logger.warning(f"Insufficient data points: {len(data)}. Need at least 50.")
+                return {}
+
+            # Ensure we're working with Series objects, not single values
+            close_prices = data['Close'].copy()
+            high_prices = data['High'].copy()
+            low_prices = data['Low'].copy()
+            volume = data['Volume'].copy()
             
-            # Moving Averages
-            sma_20 = close_prices.rolling(window=20).mean().iloc[-1]
-            sma_50 = close_prices.rolling(window=50).mean().iloc[-1]
-            ema_12 = close_prices.ewm(span=12).mean().iloc[-1]
-            ema_26 = close_prices.ewm(span=26).mean().iloc[-1]
+            # Calculate all rolling values first, keeping them as Series
+            sma20_series = close_prices.rolling(window=20).mean()
+            sma50_series = close_prices.rolling(window=50).mean()
             
-            # MACD
-            macd_line = ema_12 - ema_26
-            signal_line = macd_line.ewm(span=9).mean().iloc[-1]
-            macd_histogram = macd_line - signal_line
+            # MACD calculation
+            ema12_series = close_prices.ewm(span=12, adjust=False).mean()
+            ema26_series = close_prices.ewm(span=26, adjust=False).mean()
             
-            # Bollinger Bands (20-day, 2 standard deviations)
-            bb_middle = close_prices.rolling(window=20).mean()
-            bb_std = close_prices.rolling(window=20).std()
-            bb_upper = bb_middle + (bb_std * 2)
-            bb_lower = bb_middle - (bb_std * 2)
-            
-            # Calculate %B (position within Bollinger Bands)
-            current_price = close_prices.iloc[-1]
-            percent_b = (current_price - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
-            
-            # Average True Range (ATR)
-            high_low = high_prices - low_prices
-            high_close = abs(high_prices - close_prices.shift())
-            low_close = abs(low_prices - close_prices.shift())
-            ranges = pd.concat([high_low, high_close, low_close], axis=1)
-            true_range = ranges.max(axis=1)
-            atr = true_range.rolling(window=14).mean().iloc[-1]
-            
-            # Volume analysis
-            volume_sma = volume.rolling(window=20).mean().iloc[-1]
-            volume_ratio = volume.iloc[-1] / volume_sma
-            
-            # Beta calculation (using SPY as market proxy if not already SPY)
-            if '^GSPC' not in data.columns:
-                spy = yf.download('^GSPC', start=data.index[0], end=data.index[-1])['Close']
-                returns = close_prices.pct_change()
-                market_returns = spy.pct_change()
-                covariance = returns.cov(market_returns)
-                market_variance = market_returns.var()
-                beta = covariance / market_variance
+            # Only take final values after ensuring we have valid Series
+            if not (sma20_series.isna().all() or sma50_series.isna().all()):
+                sma_20 = sma20_series.iloc[-1]
+                sma_50 = sma50_series.iloc[-1]
+                ema_12 = ema12_series.iloc[-1]
+                ema_26 = ema26_series.iloc[-1]
+                
+                # MACD components
+                macd_series = ema12_series - ema26_series
+                signal_series = macd_series.ewm(span=9, adjust=False).mean()
+                
+                macd = macd_series.iloc[-1]
+                signal_line = signal_series.iloc[-1]
+                macd_histogram = macd - signal_line
+                
+                # Bollinger Bands
+                bb_middle = close_prices.rolling(window=20).mean()
+                bb_std = close_prices.rolling(window=20).std()
+                bb_upper = bb_middle + (bb_std * 2)
+                bb_lower = bb_middle - (bb_std * 2)
+                
+                current_price = close_prices.iloc[-1]
+                
+                # Ensure we have valid Bollinger Band values before calculating percent_b
+                if not (bb_upper.isna().iloc[-1] or bb_lower.isna().iloc[-1]):
+                    percent_b = (current_price - bb_lower.iloc[-1]) / (bb_upper.iloc[-1] - bb_lower.iloc[-1])
+                else:
+                    percent_b = 0.5  # Default to middle when can't calculate
+                
+                # ATR calculation
+                high_low = high_prices - low_prices
+                high_close = abs(high_prices - close_prices.shift())
+                low_close = abs(low_prices - close_prices.shift())
+                ranges = pd.concat([high_low, high_close, low_close], axis=1)
+                true_range = ranges.max(axis=1)
+                atr = true_range.rolling(window=14).mean().iloc[-1]
+                
+                # Volume analysis
+                volume_sma = volume.rolling(window=20).mean().iloc[-1]
+                volume_ratio = volume.iloc[-1] / volume_sma if volume_sma > 0 else 1.0
+                
+                # Beta calculation
+                if '^GSPC' not in data.columns:
+                    try:
+                        # Convert data index to timezone-naive if it's timezone-aware
+                        start_date = data.index[0].tz_localize(None) if hasattr(data.index[0], 'tz_localize') else data.index[0]
+                        end_date = data.index[-1].tz_localize(None) if hasattr(data.index[-1], 'tz_localize') else data.index[-1]
+                        
+                        spy = yf.download('^GSPC', start=start_date, end=end_date)['Close']
+                        
+                        # Ensure both series have matching indexes
+                        returns = close_prices.pct_change().dropna()
+                        market_returns = spy.pct_change().dropna()
+                        
+                        # Align the series
+                        returns, market_returns = returns.align(market_returns, join='inner')
+                        
+                        if len(returns) > 0 and len(market_returns) > 0:
+                            covariance = returns.cov(market_returns)
+                            market_variance = market_returns.var()
+                            beta = covariance / market_variance if market_variance != 0 else 1.0
+                        else:
+                            beta = 1.0
+                    except Exception as e:
+                        debug_logger.warning(f"Error calculating beta: {str(e)}")
+                        beta = 1.0
+                else:
+                    beta = 1.0
+                
+                # Momentum and Stochastic calculations
+                if len(close_prices) >= 10:
+                    roc = ((close_prices.iloc[-1] - close_prices.iloc[-10]) / close_prices.iloc[-10]) * 100
+                else:
+                    roc = 0.0
+                
+                # Stochastic Oscillator
+                low_14 = low_prices.rolling(window=14).min()
+                high_14 = high_prices.rolling(window=14).max()
+                
+                # Avoid division by zero in stochastic calculation
+                denominator = (high_14 - low_14)
+                k = pd.Series(0.0, index=close_prices.index)  # Initialize with zeros
+                valid_denom = denominator != 0
+                k[valid_denom] = ((close_prices - low_14) / denominator * 100)[valid_denom]
+                d = k.rolling(window=3).mean()
+                
+                return {
+                    'sma_20': sma_20,
+                    'sma_50': sma_50,
+                    'ema_12': ema_12,
+                    'ema_26': ema_26,
+                    'macd': macd,
+                    'macd_signal': signal_line,
+                    'macd_histogram': macd_histogram,
+                    'bb_upper': bb_upper.iloc[-1],
+                    'bb_lower': bb_lower.iloc[-1],
+                    'bb_percent': percent_b,
+                    'atr': atr,
+                    'volume_ratio': volume_ratio,
+                    'beta': beta,
+                    'momentum': roc,
+                    'stoch_k': k.iloc[-1],
+                    'stoch_d': d.iloc[-1]
+                }
             else:
-                beta = 1.0  # If analyzing SPY itself
+                debug_logger.warning("Unable to calculate moving averages - insufficient data")
+                return {}
             
-            # Momentum indicators
-            roc = ((close_prices.iloc[-1] - close_prices.iloc[-10]) / close_prices.iloc[-10]) * 100
-            
-            # Stochastic Oscillator
-            low_14 = low_prices.rolling(window=14).min()
-            high_14 = high_prices.rolling(window=14).max()
-            k = ((close_prices - low_14) / (high_14 - low_14)) * 100
-            d = k.rolling(window=3).mean()
-            
-            return {
-                'sma_20': sma_20,
-                'sma_50': sma_50,
-                'ema_12': ema_12,
-                'ema_26': ema_26,
-                'macd': macd_line.iloc[-1],
-                'macd_signal': signal_line,
-                'macd_histogram': macd_histogram.iloc[-1],
-                'bb_upper': bb_upper.iloc[-1],
-                'bb_lower': bb_lower.iloc[-1],
-                'bb_percent': percent_b,
-                'atr': atr,
-                'volume_ratio': volume_ratio,
-                'beta': beta,
-                'momentum': roc,
-                'stoch_k': k.iloc[-1],
-                'stoch_d': d.iloc[-1]
-            }
         except Exception as e:
             debug_logger.error(f"Error calculating technical indicators: {str(e)}")
             return {}
 
     def analyze_ticker(self, ticker: str, data: pd.DataFrame, options: Dict, sentiment: float) -> Dict:
         try:
+            debug_logger.info(f"Analyzing {ticker} with {len(data)} days of data")
+            
             # Get all indicators
             rsi = self.calculate_rsi(data)
             volatility = self.calculate_volatility(data)
@@ -311,8 +363,28 @@ class TradingAnalyzer:
             signals = {
                 'bullish': 0,
                 'bearish': 0,
-                'reasons': []
+                'reasons': [],
+                'warnings': []
             }
+            
+            # Initialize signal_strength early
+            signal_strength = {
+                'total_signals': 0,
+                'confirming_groups': 0,
+                'group_agreement': {}
+            }
+            
+            # Track signal confirmations
+            signal_groups = {
+                'trend_indicators': {'bullish': 0, 'bearish': 0},
+                'momentum_indicators': {'bullish': 0, 'bearish': 0},
+                'volatility_indicators': {'bullish': 0, 'bearish': 0},
+                'volume_indicators': {'bullish': 0, 'bearish': 0}
+            }
+            
+            # Add information about data availability
+            if len(data) < 50:
+                signals['warnings'].append(f"Limited historical data ({len(data)} days). Some technical indicators unavailable.")
             
             # RSI signals - make more sensitive
             if rsi < 40:  # Was 30
@@ -321,15 +393,12 @@ class TradingAnalyzer:
             elif rsi > 60:  # Was 70
                 signals['bearish'] += 1
                 signals['reasons'].append(f"RSI showing potential overbought ({rsi:.2f})")
-                
-            # Volatility and sentiment combined signals - lower threshold
-            if volatility > 0.15:  # Was 0.2
-                if sentiment > 0.1:  # Was 0.2
-                    signals['bullish'] += 1
-                    signals['reasons'].append("Volatility with positive sentiment")
-                elif sentiment < -0.1:  # Was -0.2
-                    signals['bearish'] += 1
-                    signals['reasons'].append("Volatility with negative sentiment")
+            else:
+                signals['reasons'].append(f"RSI is neutral ({rsi:.2f})")
+            
+            # Volatility and sentiment analysis
+            signals['warnings'].append(f"Current volatility: {volatility:.2%}")
+            signals['warnings'].append(f"Market sentiment: {sentiment:+.2f}")
             
             # Pure sentiment signals - lower threshold
             if abs(sentiment) > 0.15:  # Was 0.3
@@ -340,72 +409,123 @@ class TradingAnalyzer:
                     signals['bearish'] += 1
                     signals['reasons'].append(f"Negative sentiment ({sentiment:.2f})")
             
-            # Technical Analysis Signals
-            
-            # 1. Moving Averages (Multiple timeframes)
-            if indicators['sma_20'] > indicators['sma_50']:
-                signals['bullish'] += 1
-                signals['reasons'].append(f"Bullish MA crossover (20MA > 50MA)")
-            elif indicators['sma_20'] < indicators['sma_50']:
-                signals['bearish'] += 1
-                signals['reasons'].append(f"Bearish MA crossover (20MA < 50MA)")
-            
-            # 2. MACD
-            if indicators['macd'] > indicators['macd_signal']:
-                signals['bullish'] += 1
-                signals['reasons'].append(f"MACD bullish crossover ({indicators['macd']:.2f})")
-            elif indicators['macd'] < indicators['macd_signal']:
-                signals['bearish'] += 1
-                signals['reasons'].append(f"MACD bearish crossover ({indicators['macd']:.2f})")
-            
-            # 3. Bollinger Bands
-            if indicators['bb_percent'] < 0.2:
-                signals['bullish'] += 1
-                signals['reasons'].append("Price below lower Bollinger Band (oversold)")
-            elif indicators['bb_percent'] > 0.8:
-                signals['bearish'] += 1
-                signals['reasons'].append("Price above upper Bollinger Band (overbought)")
-            
-            # 4. Volume Analysis
-            if indicators['volume_ratio'] > 1.5:
-                if data['Close'].iloc[-1] > data['Close'].iloc[-2]:
-                    signals['bullish'] += 2  # Strong signal when volume confirms price
-                    signals['reasons'].append(f"High volume upward movement (vol ratio: {indicators['volume_ratio']:.2f})")
-                else:
-                    signals['bearish'] += 2
-                    signals['reasons'].append(f"High volume downward movement (vol ratio: {indicators['volume_ratio']:.2f})")
-            
-            # 5. Momentum
-            if indicators['momentum'] > 2:  # 2% momentum threshold
-                signals['bullish'] += 1
-                signals['reasons'].append(f"Strong positive momentum ({indicators['momentum']:.2f}%)")
-            elif indicators['momentum'] < -2:
-                signals['bearish'] += 1
-                signals['reasons'].append(f"Strong negative momentum ({indicators['momentum']:.2f}%)")
-            
-            # 6. Stochastic
-            if indicators['stoch_k'] < 20 and indicators['stoch_k'] > indicators['stoch_d']:
-                signals['bullish'] += 1
-                signals['reasons'].append(f"Stochastic oversold with bullish crossover")
-            elif indicators['stoch_k'] > 80 and indicators['stoch_k'] < indicators['stoch_d']:
-                signals['bearish'] += 1
-                signals['reasons'].append(f"Stochastic overbought with bearish crossover")
-            
-            # 7. ATR for volatility confirmation
-            avg_atr_ratio = indicators['atr'] / data['Close'].iloc[-1]
-            if avg_atr_ratio > 0.02:  # High volatility environment
-                if signals['bullish'] > signals['bearish']:
+            # Only proceed with technical analysis if we have valid indicators
+            if indicators:
+                # Technical Analysis Signals
+                # 1. Moving Averages (Multiple timeframes)
+                if indicators.get('sma_20', 0) > indicators.get('sma_50', 0):
                     signals['bullish'] += 1
-                    signals['reasons'].append(f"High volatility confirming bullish trend")
-                elif signals['bearish'] > signals['bullish']:
+                    signals['reasons'].append(f"Bullish MA crossover (20MA > 50MA)")
+                elif indicators.get('sma_20', 0) < indicators.get('sma_50', 0):
                     signals['bearish'] += 1
-                    signals['reasons'].append(f"High volatility confirming bearish trend")
+                    signals['reasons'].append(f"Bearish MA crossover (20MA < 50MA)")
+                
+                # 2. MACD
+                if indicators.get('macd', 0) > indicators.get('macd_signal', 0):
+                    signals['bullish'] += 1
+                    signals['reasons'].append(f"MACD bullish crossover ({indicators['macd']:.2f})")
+                elif indicators.get('macd', 0) < indicators.get('macd_signal', 0):
+                    signals['bearish'] += 1
+                    signals['reasons'].append(f"MACD bearish crossover ({indicators['macd']:.2f})")
+                
+                # 3. Bollinger Bands
+                if indicators.get('bb_percent', 0) < 0.2:
+                    signals['bullish'] += 1
+                    signals['reasons'].append("Price below lower Bollinger Band (oversold)")
+                elif indicators.get('bb_percent', 0) > 0.8:
+                    signals['bearish'] += 1
+                    signals['reasons'].append("Price above upper Bollinger Band (overbought)")
+                
+                # 4. Volume Analysis
+                if indicators.get('volume_ratio', 0) > 1.5:
+                    if data['Close'].iloc[-1] > data['Close'].iloc[-2]:
+                        signals['bullish'] += 2  # Strong signal when volume confirms price
+                        signals['reasons'].append(f"High volume upward movement (vol ratio: {indicators['volume_ratio']:.2f})")
+                    else:
+                        signals['bearish'] += 2
+                        signals['reasons'].append(f"High volume downward movement (vol ratio: {indicators['volume_ratio']:.2f})")
+                
+                # 5. Momentum
+                if indicators.get('momentum', 0) > 2:  # 2% momentum threshold
+                    signals['bullish'] += 1
+                    signals['reasons'].append(f"Strong positive momentum ({indicators['momentum']:.2f}%)")
+                elif indicators.get('momentum', 0) < -2:
+                    signals['bearish'] += 1
+                    signals['reasons'].append(f"Strong negative momentum ({indicators['momentum']:.2f}%)")
+                
+                # 6. Stochastic
+                if indicators.get('stoch_k', 0) < 20 and indicators.get('stoch_k', 0) > indicators.get('stoch_d', 0):
+                    signals['bullish'] += 1
+                    signals['reasons'].append(f"Stochastic oversold with bullish crossover")
+                elif indicators.get('stoch_k', 0) > 80 and indicators.get('stoch_k', 0) < indicators.get('stoch_d', 0):
+                    signals['bearish'] += 1
+                    signals['reasons'].append(f"Stochastic overbought with bearish crossover")
+                
+                # 7. ATR for volatility confirmation
+                avg_atr_ratio = indicators.get('atr', 0) / data['Close'].iloc[-1]
+                if avg_atr_ratio > 0.02:  # High volatility environment
+                    if signals['bullish'] > signals['bearish']:
+                        signals['bullish'] += 1
+                        signals['reasons'].append(f"High volatility confirming bullish trend")
+                    elif signals['bearish'] > signals['bullish']:
+                        signals['bearish'] += 1
+                        signals['reasons'].append(f"High volatility confirming bearish trend")
+                
+                # 8. Beta consideration
+                if indicators.get('beta', 0) > 1.2:
+                    signals['reasons'].append(f"High beta ({indicators['beta']:.2f}) suggests amplified market moves")
+                elif indicators.get('beta', 0) < 0.8:
+                    signals['reasons'].append(f"Low beta ({indicators['beta']:.2f}) suggests muted market moves")
             
-            # 8. Beta consideration
-            if indicators['beta'] > 1.2:
-                signals['reasons'].append(f"High beta ({indicators['beta']:.2f}) suggests amplified market moves")
-            elif indicators['beta'] < 0.8:
-                signals['reasons'].append(f"Low beta ({indicators['beta']:.2f}) suggests muted market moves")
+            # Update signal groups based on indicators
+            if indicators:
+                # Trend indicators
+                if indicators.get('sma_20', 0) > indicators.get('sma_50', 0):
+                    signal_groups['trend_indicators']['bullish'] += 1
+                elif indicators.get('sma_20', 0) < indicators.get('sma_50', 0):
+                    signal_groups['trend_indicators']['bearish'] += 1
+                
+                # Momentum indicators
+                if rsi < 40:
+                    signal_groups['momentum_indicators']['bullish'] += 1
+                elif rsi > 60:
+                    signal_groups['momentum_indicators']['bearish'] += 1
+                
+                # Volatility indicators
+                if indicators.get('bb_percent', 0) < 0.2:
+                    signal_groups['volatility_indicators']['bullish'] += 1
+                elif indicators.get('bb_percent', 0) > 0.8:
+                    signal_groups['volatility_indicators']['bearish'] += 1
+                
+                # Volume indicators
+                if indicators.get('volume_ratio', 0) > 1.5:
+                    if data['Close'].iloc[-1] > data['Close'].iloc[-2]:
+                        signal_groups['volume_indicators']['bullish'] += 1
+                    else:
+                        signal_groups['volume_indicators']['bearish'] += 1
+            
+            # Calculate signal strength metrics
+            signal_strength['total_signals'] = len(signals['reasons'])
+            
+            # Determine overall direction
+            overall_direction = 'bullish' if signals['bullish'] > signals['bearish'] else 'bearish'
+            
+            # Calculate group agreement
+            for group_name, group_data in signal_groups.items():
+                total_signals = group_data['bullish'] + group_data['bearish']
+                if total_signals > 0:
+                    group_direction = 'bullish' if group_data['bullish'] > group_data['bearish'] else 'bearish'
+                    if group_direction == overall_direction:
+                        signal_strength['confirming_groups'] += 1
+                    # Fixed strength calculation
+                    signal_strength['group_agreement'][group_name] = {
+                        'agrees': group_direction == overall_direction,
+                        'strength': max(group_data['bullish'], group_data['bearish']) / total_signals if total_signals > 0 else 0
+                    }
+            
+            # Calculate confirmation score
+            active_groups = len([g for g in signal_groups.values() if sum(g.values()) > 0])
+            confirmation_score = (signal_strength['confirming_groups'] / active_groups * 100) if active_groups > 0 else 0
             
             # Adjust confidence based on signal strength and confirmation
             signal_diff = abs(signals['bullish'] - signals['bearish'])
@@ -413,23 +533,71 @@ class TradingAnalyzer:
             
             # Determine direction and confidence
             if signals['bullish'] == signals['bearish']:
-                return {}
+                return {
+                    'ticker': ticker,
+                    'status': 'no_suggestion',
+                    'message': "No trading suggestion available",
+                    'reasons': [],
+                    'warnings': signals['warnings']
+                }
                 
             direction = 'call' if signals['bullish'] > signals['bearish'] else 'put'
             
-            # Select option
+            # Select option with more defensive checks
             chain = options.get('calls' if direction == 'call' else 'puts', pd.DataFrame())
-            if chain.empty:
-                return {}
-                
+            if chain.empty or len(chain) == 0:
+                return {
+                    'ticker': ticker,
+                    'status': 'no_suggestion',
+                    'message': "No valid options available",
+                    'reasons': signals['reasons'],
+                    'warnings': signals['warnings']
+                }
+            
             current_price = data['Close'].iloc[-1]
-            atm_option = chain.iloc[(chain['strike'] - current_price).abs().argsort()[:1]]
+            
+            # More defensive option selection
+            try:
+                strike_diffs = (chain['strike'] - current_price).abs()
+                if len(strike_diffs) == 0:
+                    return {
+                        'ticker': ticker,
+                        'status': 'no_suggestion',
+                        'message': "No valid strike prices found",
+                        'reasons': signals['reasons'],
+                        'warnings': signals['warnings']
+                    }
+                
+                atm_idx = strike_diffs.idxmin()
+                atm_option = chain.loc[atm_idx:atm_idx]
+                
+                if atm_option.empty:
+                    return {
+                        'ticker': ticker,
+                        'status': 'no_suggestion',
+                        'message': "Could not find appropriate strike price",
+                        'reasons': signals['reasons'],
+                        'warnings': signals['warnings']
+                    }
+            except Exception as e:
+                debug_logger.error(f"Error selecting option strike: {str(e)}")
+                return {
+                    'ticker': ticker,
+                    'status': 'error',
+                    'message': f"Error selecting option strike: {str(e)}",
+                    'warnings': signals['warnings']
+                }
             
             # Get expiration date from options data
             exp_date = options.get('expiration_date')
             if not exp_date:
                 debug_logger.error(f"Could not determine expiration date for {ticker}")
-                return {}
+                return {
+                    'ticker': ticker,
+                    'status': 'error',
+                    'message': f"Could not determine expiration date for {ticker}",
+                    'warnings': signals['warnings']
+                }
                 
             # Calculate days to expiry
             exp_datetime = datetime.strptime(exp_date, '%Y-%m-%d')
@@ -454,72 +622,22 @@ class TradingAnalyzer:
             if greeks['vega'] > 1.0:
                 greek_analysis.append(f"High Vega ({greeks['vega']:.2f}) shows significant volatility sensitivity")
             
-            # Track signal confirmations
-            signal_groups = {
-                'trend_indicators': {
-                    'bullish': 0,
-                    'bearish': 0,
-                    'signals': ['sma_crossover', 'macd', 'momentum']
-                },
-                'momentum_indicators': {
-                    'bullish': 0,
-                    'bearish': 0,
-                    'signals': ['rsi', 'stochastic']
-                },
-                'volatility_indicators': {
-                    'bullish': 0,
-                    'bearish': 0,
-                    'signals': ['bollinger_bands', 'atr']
-                },
-                'volume_indicators': {
-                    'bullish': 0,
-                    'bearish': 0,
-                    'signals': ['volume_ratio']
-                }
-            }
+            # Format the reasoning text properly
+            all_reasons = []
+            if signals['reasons']:
+                all_reasons.extend(signals['reasons'])
+            if greek_analysis:
+                all_reasons.extend(greek_analysis)
             
-            for group, data in signal_groups.items():
-                if data['signals'][0] in signals['reasons'] or data['signals'][1] in signals['reasons']:
-                    if data['signals'][0] in signals['reasons']:
-                        data['bullish'] += 1
-                    if data['signals'][1] in signals['reasons']:
-                        data['bearish'] += 1
-            
-            # Calculate signal strength metrics
-            signal_strength = {
-                'total_signals': len(signals['reasons']),
-                'confirming_groups': 0,
-                'group_agreement': {}
-            }
-            
-            for group, data in signal_groups.items():
-                if data['bullish'] > 0 or data['bearish'] > 0:
-                    # Calculate group direction
-                    group_direction = 'bullish' if data['bullish'] > data['bearish'] else 'bearish'
-                    overall_direction = 'bullish' if signals['bullish'] > signals['bearish'] else 'bearish'
-                    
-                    # Check if group agrees with overall direction
-                    if group_direction == overall_direction:
-                        signal_strength['confirming_groups'] += 1
-                    
-                    # Store group agreement details
-                    signal_strength['group_agreement'][group] = {
-                        'agrees': group_direction == overall_direction,
-                        'strength': max(data['bullish'], data['bearish']) / len(data['signals'])
-                    }
-            
-            # Calculate overall confirmation percentage
-            confirmation_score = (signal_strength['confirming_groups'] / len(signal_groups)) * 100
-            
-            # Add signal strength to the output
             return {
                 'ticker': ticker,
-                'type': direction,
-                'strike': float(atm_option['strike'].iloc[0]),
-                'expiration': exp_date,
-                'confidence': confidence,
-                'reasoning': ' | '.join(signals['reasons'] + greek_analysis),
-                'greeks': greeks,
+                'type': direction if 'direction' in locals() else None,
+                'strike': float(atm_option['strike'].iloc[0]) if 'atm_option' in locals() else None,
+                'expiration': exp_date if 'exp_date' in locals() else None,
+                'confidence': confidence if 'confidence' in locals() else 0,
+                'reasoning': all_reasons,  # Keep as a list instead of joining
+                'warnings': signals['warnings'],
+                'greeks': greeks if 'greeks' in locals() else None,
                 'signal_strength': {
                     'confirmation_score': confirmation_score,
                     'total_signals': signal_strength['total_signals'],
@@ -530,7 +648,12 @@ class TradingAnalyzer:
             
         except Exception as e:
             debug_logger.error(f"Error analyzing {ticker}: {str(e)}")
-            return {}
+            return {
+                'ticker': ticker,
+                'status': 'error',
+                'message': f"Error during analysis: {str(e)}",
+                'warnings': [f"Analysis failed: {str(e)}"]
+            }
 
 class TradingSuggestionEngine:
     def __init__(self):
@@ -585,50 +708,41 @@ Confidence: How strong the trading signals are (25-100%)
     for ticker in tickers:
         suggestion = engine.generate_suggestion(ticker)
         if suggestion:
-            # Calculate expiration days
-            exp_date = datetime.strptime(suggestion['expiration'], '%Y-%m-%d')
-            days_to_exp = (exp_date - datetime.now()).days
-            
             output = f"\n{ticker}:\n"
-            output += f"→ {suggestion['type'].upper()} @ ${suggestion['strike']:.2f}\n"
-            output += f"→ Expires: {days_to_exp} days ({exp_date.strftime('%Y-%m-%d')})\n"
-            output += f"→ Confidence: {suggestion['confidence']}%\n"
-            output += f"→ Greeks:\n"
-            output += f"  • Delta: {suggestion['greeks']['delta']:.3f} (Probability of profit, >0.50 is bullish)\n"
-            output += f"  • Gamma: {suggestion['greeks']['gamma']:.3f} (Higher values mean faster Delta changes)\n"
-            output += f"  • Theta: ${suggestion['greeks']['theta']:.2f}/day (Daily cost of time decay)\n"
-            output += f"  • Vega: ${suggestion['greeks']['vega']:.2f} (Price change per 1% volatility change)\n"
-            output += f"→ Reasoning:\n"
             
-            # Add explanations for each signal
-            for reason in suggestion['reasoning'].split(' | '):
-                explanation = ""
-                if "RSI" in reason:
-                    if "overbought" in reason:
-                        explanation = "(Stock may be overvalued, suggesting potential decline)"
-                    elif "oversold" in reason:
-                        explanation = "(Stock may be undervalued, suggesting potential rise)"
-                elif "Volatility" in reason:
-                    explanation = "(Price movement is significant enough to suggest a trading opportunity)"
-                elif "sentiment" in reason:
-                    explanation = "(News and market sentiment suggest this direction)"
-                elif "trend" in reason:
-                    explanation = "(Recent price movement supports this direction)"
+            if suggestion.get('status') == 'no_suggestion':
+                output += f"→ {suggestion['message']}\n"
+                if suggestion.get('warnings'):
+                    output += "→ Additional Information:\n"
+                    for warning in suggestion['warnings']:
+                        output += f"  • {warning}\n"
+            elif suggestion.get('status') == 'error':
+                output += f"→ Error: {suggestion['message']}\n"
+            else:
+                if suggestion.get('type'):
+                    output += f"→ {suggestion['type'].upper()} @ ${suggestion['strike']:.2f}\n"
+                    output += f"→ Expires: {suggestion['expiration']}\n"
+                    output += f"→ Confidence: {suggestion['confidence']}%\n"
                 
-                output += f"  • {reason} {explanation}\n"
+                if suggestion.get('greeks'):
+                    output += f"→ Greeks:\n"
+                    for greek, value in suggestion['greeks'].items():
+                        output += f"  • {greek.capitalize()}: {value:.3f}\n"
+                
+                if suggestion.get('reasoning'):
+                    output += f"→ Reasoning:\n"
+                    for reason in suggestion['reasoning']:
+                        output += f"  • {reason}\n"
             
-            output += f"→ Signal Strength:\n"
-            output += f"  • Confirmation Score: {suggestion['signal_strength']['confirmation_score']:.0f}% of indicator groups agree\n"
-            output += f"  • Total Signals: {suggestion['signal_strength']['total_signals']}\n"
-            output += f"  • Indicator Group Agreement:\n"
-            for group, details in suggestion['signal_strength']['group_details'].items():
-                agreement = "✓" if details['agrees'] else "✗"
-                output += f"    - {group.replace('_', ' ').title()}: {agreement} ({details['strength']*100:.0f}% strength)\n"
+            if suggestion.get('warnings'):
+                output += f"→ Notes:\n"
+                for warning in suggestion['warnings']:
+                    output += f"  • {warning}\n"
             
             print(output)
             suggestions_logger.info(output)
         else:
-            msg = f"\n{ticker}: No trading suggestion (signals are neutral or conflicting)"
+            msg = f"\n{ticker}: Unable to generate trading suggestion"
             print(msg)
             suggestions_logger.info(msg)
 
